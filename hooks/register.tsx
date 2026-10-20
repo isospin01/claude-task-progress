@@ -11,7 +11,7 @@ const steps = atom({ plugin: 'task-progress', key: 'steps' } as const, [] as Ste
 const BAR_WIDTH = 24
 const TOOL = 'mcp__task-progress__progress'
 // Kept short: this text rides on every request.
-const INSTRUCTIONS = `For tasks of 3+ steps, report progress with ${TOOL}: {"plan":[titles],"done":0} at the start, then {"done":N} as steps finish. Send it in parallel with your other tool calls, never alone; only the final update may go alone. Skip it for short tasks.`
+const INSTRUCTIONS = `Required: when a task has 3 or more steps, call ${TOOL} with {"plan":[titles],"done":0} in the same message as your first tool call, then {"done":N} alongside later tool calls as steps finish, and {"done":total} at the end. Only that final call may be sent alone. Not needed for 1-2 step tasks or plain questions.`
 
 type ProgressInput = { plan?: unknown; done?: unknown }
 
