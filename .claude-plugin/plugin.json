@@ -1,1 +1,1 @@
-{ "name": "task-progress", "version": "0.2.0", "description": "Progress bar above the prompt showing Claude's task list: steps done out of total and the current step.", "types": "./types/index.d.ts" }
+{ "name": "task-progress", "version": "0.3.0", "description": "Progress bar above the prompt showing Claude's task list: steps done out of total and the current step.", "types": "./types/index.d.ts" }

@@ -10,52 +10,46 @@ const steps = atom({ plugin: 'task-progress', key: 'steps' } as const, [] as Ste
 
 const BAR_WIDTH = 24
 const TOOL = 'mcp__task-progress__progress'
-const STATUSES = ['pending', 'in_progress', 'completed'] as const
+// Kept short: this text rides on every request.
+const INSTRUCTIONS = `For tasks of 3+ steps, report progress with ${TOOL}: {"plan":[titles],"done":0} at the start, then {"done":N} as steps finish. Send it in parallel with your other tool calls, never alone; only the final update may go alone. Skip it for short tasks.`
 
-const INSTRUCTIONS = `# Task progress
-The user sees a progress bar driven by the ${TOOL} tool. For any task that takes three or more distinct steps, call ${TOOL} before starting the work with the full plan, the first step in_progress. Call it again with the whole updated list each time a step finishes or the next one starts, before moving on. Mark a step completed only once it is actually done. Keep the list honest: add steps you discover, drop ones that no longer apply. When the work is finished, call it once more with every step completed. Skip it for quick one-step requests and for plain questions.`
+type ProgressInput = { plan?: unknown; done?: unknown }
 
-type ProgressInput = { steps?: Array<{ title?: unknown; status?: unknown }> }
-
-function parse(input: ProgressInput): Step[] | string {
-  if (!Array.isArray(input.steps) || input.steps.length === 0) {
-    return 'steps must be a non-empty array'
-  }
-  const out: Step[] = []
-  for (const [i, s] of input.steps.entries()) {
-    const status = STATUSES.find(x => x === s.status)
-    if (typeof s.title !== 'string' || s.title.trim() === '' || status === undefined) {
-      return `step ${i + 1} needs a title and a status of pending, in_progress or completed`
+// The plan is sent once; each later call carries only the done count.
+function apply(list: Step[], input: ProgressInput): Step[] | string {
+  let titles = list.map(s => s.subject)
+  if (input.plan !== undefined) {
+    if (!Array.isArray(input.plan) || input.plan.length === 0 || !input.plan.every(t => typeof t === 'string' && t.trim() !== '')) {
+      return 'plan must be a non-empty list of step titles'
     }
-    out.push({ id: String(i), subject: s.title.trim(), status })
+    titles = input.plan.map(t => String(t).trim())
   }
-  return out
+  if (titles.length === 0) {
+    return 'send plan first'
+  }
+  const prevDone = list.filter(s => s.status === 'completed').length
+  const done = input.done === undefined ? Math.min(prevDone, titles.length) : input.done
+  if (typeof done !== 'number' || !Number.isInteger(done) || done < 0 || done > titles.length) {
+    return `done must be a whole number from 0 to ${titles.length}`
+  }
+  return titles.map((subject, i) => ({
+    id: String(i),
+    subject,
+    status: i < done ? 'completed' : i === done ? 'in_progress' : 'pending',
+  }))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'progress',
-      description:
-        'Report your plan and progress on a multi-step task to the progress bar the user sees. ' +
-        'Send the whole step list every time, each step with its status. Exactly one step should be in_progress while work remains.',
+      description: 'Progress bar. plan: step titles (once, or again if it changes). done: steps finished.',
       inputSchema: {
         type: 'object',
         properties: {
-          steps: {
-            type: 'array',
-            minItems: 1,
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string', description: 'Short step title, e.g. "Run the tests"' },
-                status: { type: 'string', enum: [...STATUSES] },
-              },
-              required: ['title', 'status'],
-            },
-          },
+          plan: { type: 'array', items: { type: 'string' } },
+          done: { type: 'integer', minimum: 0 },
         },
-        required: ['steps'],
       },
       isDeferred: false,
     })
@@ -79,16 +73,16 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
-    const parsed = parse(e as unknown as ProgressInput)
-    if (typeof parsed === 'string') {
-      return { deny: `progress: ${parsed}` }
-    }
     // Subagents keep their own plans; only the main agent's work drives the bar.
-    if (e.agentId === undefined) {
-      await update($, steps, () => parsed)
+    if (e.agentId !== undefined) {
+      return { result: 'ok' }
     }
-    const done = parsed.filter(s => s.status === 'completed').length
-    return { result: `Progress recorded: ${done}/${parsed.length} steps done.` }
+    const next = apply(await read($, steps), e as unknown as ProgressInput)
+    if (typeof next === 'string') {
+      return { deny: `progress: ${next}` }
+    }
+    await update($, steps, () => next)
+    return { result: 'ok' }
   })
 
   on('tool.call', async ($, e, next) => {
