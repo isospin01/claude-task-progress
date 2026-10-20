@@ -6,7 +6,7 @@ A Claude Code mod that shows a progress bar above the prompt while Claude works 
 ██████████░░░░░░░░░░░░░░ 2/5 · 40%  Running the tests
 ```
 
-The bar counts steps completed out of steps planned, read from Claude's own task tools (TodoWrite, TaskCreate, TaskUpdate, TaskList), and shows the step in progress. It turns green when all steps are done and clears on your next request.
+The mod gives Claude a `progress` tool and tells it to report its plan and each finished step for any task with three or more steps. The bar counts steps completed out of steps planned and shows the step in progress. On Claude Code builds that have the built-in task tools (TodoWrite, TaskCreate, TaskUpdate, TaskList), it follows those too. It turns green when all steps are done and clears on your next request.
 
 ## Install
 

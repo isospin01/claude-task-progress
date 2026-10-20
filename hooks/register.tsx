@@ -3,12 +3,72 @@ import type { Register } from 'claude-code'
 
 import type { Step } from '../types'
 
-// The main agent's task list, mirrored from the task tools' own results.
+// The main agent's task list. Fed by this mod's own `progress` tool, and by
+// the built-in task tools (TodoWrite, TaskCreate/TaskUpdate/TaskList) on
+// builds that have them.
 const steps = atom({ plugin: 'task-progress', key: 'steps' } as const, [] as Step[])
 
 const BAR_WIDTH = 24
+const TOOL = 'mcp__task-progress__progress'
+const STATUSES = ['pending', 'in_progress', 'completed'] as const
+
+const INSTRUCTIONS = `# Task progress
+The user sees a progress bar driven by the ${TOOL} tool. For any task that takes three or more distinct steps, call ${TOOL} before starting the work with the full plan, the first step in_progress. Call it again with the whole updated list each time a step finishes or the next one starts, before moving on. Mark a step completed only once it is actually done. Keep the list honest: add steps you discover, drop ones that no longer apply. When the work is finished, call it once more with every step completed. Skip it for quick one-step requests and for plain questions.`
+
+type ProgressInput = { steps?: Array<{ title?: unknown; status?: unknown }> }
+
+function parse(input: ProgressInput): Step[] | string {
+  if (!Array.isArray(input.steps) || input.steps.length === 0) {
+    return 'steps must be a non-empty array'
+  }
+  const out: Step[] = []
+  for (const [i, s] of input.steps.entries()) {
+    const status = STATUSES.find(x => x === s.status)
+    if (typeof s.title !== 'string' || s.title.trim() === '' || status === undefined) {
+      return `step ${i + 1} needs a title and a status of pending, in_progress or completed`
+    }
+    out.push({ id: String(i), subject: s.title.trim(), status })
+  }
+  return out
+}
 
 export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.tool.register({
+      name: 'progress',
+      description:
+        'Report your plan and progress on a multi-step task to the progress bar the user sees. ' +
+        'Send the whole step list every time, each step with its status. Exactly one step should be in_progress while work remains.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          steps: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string', description: 'Short step title, e.g. "Run the tests"' },
+                status: { type: 'string', enum: [...STATUSES] },
+              },
+              required: ['title', 'status'],
+            },
+          },
+        },
+        required: ['steps'],
+      },
+      isDeferred: false,
+    })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    return {
+      sections: [...composed.sections, { id: 'task-progress:instructions', text: INSTRUCTIONS, scope: 'session' as const }],
+    }
+  }).catch(($, e, next) => next(e))
+
   // A finished list is cleared when the next prompt starts new work.
   on('prompt.submit', async ($, e, next) => {
     const list = await read($, steps)
@@ -18,59 +78,71 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('tool.call', { tool: TOOL }, async ($, e) => {
+    const parsed = parse(e as unknown as ProgressInput)
+    if (typeof parsed === 'string') {
+      return { deny: `progress: ${parsed}` }
+    }
+    // Subagents keep their own plans; only the main agent's work drives the bar.
+    if (e.agentId === undefined) {
+      await update($, steps, () => parsed)
+    }
+    const done = parsed.filter(s => s.status === 'completed').length
+    return { result: `Progress recorded: ${done}/${parsed.length} steps done.` }
+  })
+
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
-    // Subagents keep their own lists; only the main agent's work is tracked.
     if (e.agentId !== undefined || ran.deny !== undefined || ran.isError) {
       return ran
     }
 
     try {
-    if (e.tool === 'TodoWrite') {
-      await update($, steps, () =>
-        e.todos.map((t, i) => ({
-          id: String(i),
-          subject: t.content,
-          activeForm: t.activeForm,
-          status: t.status,
-        })),
-      )
-    } else if (e.tool === 'TaskCreate') {
-      const created = ran.result as { task: { id: string; subject: string } }
-      await update($, steps, list => [
-        ...list.filter(s => s.id !== created.task.id),
-        { id: created.task.id, subject: e.subject, activeForm: e.activeForm, status: 'pending' as const },
-      ])
-    } else if (e.tool === 'TaskUpdate') {
-      const res = ran.result as { success: boolean }
-      if (res.success) {
-        const status = e.status
+      if (e.tool === 'TodoWrite') {
+        await update($, steps, () =>
+          e.todos.map((t, i) => ({
+            id: String(i),
+            subject: t.content,
+            activeForm: t.activeForm,
+            status: t.status,
+          })),
+        )
+      } else if (e.tool === 'TaskCreate') {
+        const created = ran.result as { task: { id: string; subject: string } }
+        await update($, steps, list => [
+          ...list.filter(s => s.id !== created.task.id),
+          { id: created.task.id, subject: e.subject, activeForm: e.activeForm, status: 'pending' as const },
+        ])
+      } else if (e.tool === 'TaskUpdate') {
+        const res = ran.result as { success: boolean }
+        if (res.success) {
+          const status = e.status
+          await update($, steps, list =>
+            status === 'deleted'
+              ? list.filter(s => s.id !== e.taskId)
+              : list.map((s): Step =>
+                  s.id !== e.taskId
+                    ? s
+                    : {
+                        ...s,
+                        subject: e.subject ?? s.subject,
+                        activeForm: e.activeForm ?? s.activeForm,
+                        status: status ?? s.status,
+                      },
+                ),
+          )
+        }
+      } else if (e.tool === 'TaskList') {
+        const res = ran.result as { tasks: Array<{ id: string; subject: string; status: Step['status'] }> }
         await update($, steps, list =>
-          status === 'deleted'
-            ? list.filter(s => s.id !== e.taskId)
-            : list.map((s): Step =>
-                s.id !== e.taskId
-                  ? s
-                  : {
-                      ...s,
-                      subject: e.subject ?? s.subject,
-                      activeForm: e.activeForm ?? s.activeForm,
-                      status: status ?? s.status,
-                    },
-              ),
+          res.tasks.map(t => ({
+            id: t.id,
+            subject: t.subject,
+            activeForm: list.find(s => s.id === t.id)?.activeForm,
+            status: t.status,
+          })),
         )
       }
-    } else if (e.tool === 'TaskList') {
-      const res = ran.result as { tasks: Array<{ id: string; subject: string; status: Step['status'] }> }
-      await update($, steps, list =>
-        res.tasks.map(t => ({
-          id: t.id,
-          subject: t.subject,
-          activeForm: list.find(s => s.id === t.id)?.activeForm,
-          status: t.status,
-        })),
-      )
-    }
     } catch {
       // A tracking failure never affects the tool call itself.
     }
