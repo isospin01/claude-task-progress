@@ -1,0 +1,11 @@
+{
+  "name": "claude-task-progress",
+  "owner": { "name": "isospin01" },
+  "plugins": [
+    {
+      "name": "task-progress",
+      "source": "./",
+      "description": "Progress bar above the prompt showing Claude's task list: steps done out of total and the current step."
+    }
+  ]
+}
